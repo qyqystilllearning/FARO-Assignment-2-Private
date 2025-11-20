@@ -1,0 +1,43 @@
+{% extends "layout.html" %}
+{% block content %}
+
+<div class="file-section">
+    <h3>Performance Comparison Results</h3>
+    <p class="description text-muted">Below are the benchmark results for the uploaded file using different encryption algorithms.</p>
+    
+    <div class="card">
+        <div class="card-body">
+            <h5 class="card-title">File: {{ filename }}</h5>
+            <p class="card-text">
+                <strong>Original File Size:</strong> {{ filesize }} bytes
+            </p>
+
+            <table class="table table-bordered table-striped">
+                <thead class="thead-dark">
+                    <tr>
+                        <th>Algorithm</th>
+                        <th>Encryption Time</th>
+                        <th>Decryption Time</th>
+                        <th>Ciphertext Size (bytes)</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for res in results %}
+                    <tr>
+                        <td><strong>{{ res.algo }}</strong></td>
+                        <td>{{ res.enc_time_ms }} ms</td>
+                        <td>{{ res.dec_time_ms }} ms</td>
+                        <td>{{ res.ciphertext_size }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            
+            <hr>
+            <a href="{{ url_for('dashboard') }}" class="btn btn-primary">
+                &larr; Back to Dashboard
+            </a>
+        </div>
+    </div>
+</div>
+{% endblock %}

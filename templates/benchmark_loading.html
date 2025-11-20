@@ -1,0 +1,22 @@
+{% extends "layout.html" %}
+
+{% block content %}
+<div class="card text-center">
+    <div class="card-body" style="padding: 5rem;">
+        <h3 class="card-title">Running Benchmark...</h3>
+        <p class="card-text">
+            This may take a moment for large files. Please wait.
+        </p>
+        
+        <div class="spinner-border text-primary" role="status">
+            <span class="visually-hidden">Loading...</span>
+        </div>
+    </div>
+</div>
+
+<script>
+    setTimeout(function() {
+        window.location.href = "{{ url_for('execute_benchmark', file_uuid=file_uuid) }}";
+    }, 1000); 
+</script>
+{% endblock %}

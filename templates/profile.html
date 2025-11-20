@@ -1,0 +1,130 @@
+{% extends "layout.html" %}
+{% block content %}
+
+<div class="row">
+    <div class="col-md-4">
+        <div class="file-section">
+            <h3>Profile</h3>
+            <p class="description text-muted">Your account details and logout option</p>
+            <div class="card">
+                <div class="card-body text-center">
+                    {% set profile_pic_url = url_for('static', filename='profile_pics/' + current_user.profile_image_file) %}
+                    
+                    <img src="{{ profile_pic_url }}" alt="Profile Picture" 
+                         class="rounded-circle img-thumbnail mb-3" 
+                         style="width: 150px; height: 150px; object-fit: cover;">
+                    
+                    <h3 class="fw-bold">{{ current_user.username }}</h3>
+                    <p class="text-muted">User ID: {{ current_user.id }}</p>
+                    <hr>
+                    <a href="{{ url_for('logout') }}" class="btn btn-danger w-100">Logout</a>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-8">
+        <div class="file-section">
+            <h3>Upload</h3>
+            <p class="description text-muted">Upload your profile picture here</p>
+            <div class="card">
+                <div class="card-body">
+                    <form method="POST" enctype="multipart/form-data" id="profileUploadForm">
+                        
+                        <div id="profile-drop-zone-container">
+                            <label for="profile_pic" class="file-upload-label" id="profile-drop-zone">
+                                <i class="fa-solid fa-cloud-arrow-up"></i>
+                                <span class="upload-text">Click here to upload your picture or drag.</span>
+                                <span class="supported-formats">Allowed: .png, .jpg, .jpeg</span>
+                            </label>
+                        </div>
+
+                        <div id="profile-preview-container" style="display: none;">
+                            <div class="file-preview-box">
+                                <div class="file-preview-details">
+                                    <i id="profile-preview-icon" class="fa-solid fa-file-image image"></i>
+                                    <div class="file-preview-info">
+                                        <span id="profile-preview-filename">Filename.jpg</span>
+                                        <span id="profile-preview-filesize">1.21 MB</span>
+                                    </div>
+                                </div>
+                                <button type="button" class="delete-btn" id="profile-remove-file-btn">
+                                    <i class="fa-solid fa-trash-can"></i>
+                                </button>
+                            </div>
+                        </div>
+
+                        <input class="form-control" type="file" id="profile_pic" name="profile_pic" required style="display: none;">
+
+                        <div class="upload-options">
+                            <button type="submit" class="btn btn-primary upload-encrypt-btn">Update Picture</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const uploadForm = document.getElementById('profileUploadForm');
+    const fileInput = document.getElementById('profile_pic');
+    const dropZone = document.getElementById('profile-drop-zone');
+    const dropZoneContainer = document.getElementById('profile-drop-zone-container');
+    const previewContainer = document.getElementById('profile-preview-container');
+    const removeFileBtn = document.getElementById('profile-remove-file-btn');
+    
+    const previewIcon = document.getElementById('profile-preview-icon');
+    const previewFilename = document.getElementById('profile-preview-filename');
+    const previewFilesize = document.getElementById('profile-preview-filesize');
+
+    function showPreview(file) {
+        dropZoneContainer.style.display = 'none';
+        previewContainer.style.display = 'block';
+
+        previewFilename.textContent = file.name;
+        previewFilesize.textContent = (file.size / 1024 / 1024).toFixed(2) + ' MB';
+
+        previewIcon.className = 'fa-solid fa-file-image file-icon-preview image';
+    }
+
+    function hidePreview() {
+        fileInput.value = null; 
+        previewContainer.style.display = 'none';
+        dropZoneContainer.style.display = 'block';
+    }
+
+    fileInput.addEventListener('change', () => {
+        if (fileInput.files.length > 0) {
+            showPreview(fileInput.files[0]);
+        }
+    });
+
+    removeFileBtn.addEventListener('click', hidePreview);
+
+    uploadForm.addEventListener('reset', hidePreview);
+
+    dropZone.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        dropZone.classList.add('drag-over');
+    });
+
+    dropZone.addEventListener('dragleave', () => {
+        dropZone.classList.remove('drag-over');
+    });
+
+    dropZone.addEventListener('drop', (e) => {
+        e.preventDefault();
+        dropZone.classList.remove('drag-over');
+        
+        const files = e.dataTransfer.files;
+        if (files.length > 0) {
+            fileInput.files = files;
+            fileInput.dispatchEvent(new Event('change')); 
+        }
+    });
+});
+</script>
+{% endblock %}
