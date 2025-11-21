@@ -1,5 +1,4 @@
-# Secure Financial Report Sharing
-
+# Secure Financial Report Sharing Assignment 2
 **Group 5 - FARO**
 | Name | NRP |
 | :--- | :--- |
