@@ -229,12 +229,12 @@ def logout():
 @login_required
 def dashboard():
     if current_user.role == 'organization':
-        my_files = File.query.filter_by(owner_id=current_user.id).all()
+        my_files = File.query.filter_by(owner_id=current_user.id).order_by(File.id.desc()).all()
         pending_requests = AccessRequest.query.join(File).filter(File.owner_id == current_user.id, AccessRequest.status == 'pending').all()
         return render_template('dashboard.html', files=my_files, requests=pending_requests)
     
     elif current_user.role == 'consultant':
-        all_files = File.query.join(User).filter(User.role == 'organization').all()
+        all_files = File.query.join(User).filter(User.role == 'organization').order_by(File.id.desc()).all()
         my_requests = {r.file_id: r.status for r in AccessRequest.query.filter_by(consultant_id=current_user.id).all()}
         return render_template('dashboard.html', all_files=all_files, my_requests=my_requests)
 
