@@ -2,6 +2,8 @@ import os
 import json
 import base64
 from flask import Flask, render_template, url_for, redirect, request, flash, send_file, Response
+from werkzeug.utils import secure_filename
+from uuid import uuid4
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import UserMixin, login_user, LoginManager, login_required, logout_user, current_user
 from flask_bcrypt import Bcrypt
@@ -331,11 +333,50 @@ def my_access():
     approved_requests = AccessRequest.query.filter_by(consultant_id=current_user.id, status='approved').all()
     return render_template('my_access.html', requests=approved_requests)
 
-@app.route('/download/<int:request_id>', methods=['POST'])
+
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg'}
+
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
+@app.route('/profile', methods=['GET', 'POST'])
 @login_required
-def download_file(request_id):
+def profile():
+    if request.method == 'POST':
+        # Handle profile picture upload
+        if 'profile_pic' not in request.files:
+            flash('No file part in request.', 'danger')
+            return redirect(url_for('profile'))
+
+        file = request.files['profile_pic']
+        if file.filename == '':
+            flash('No selected file.', 'danger')
+            return redirect(url_for('profile'))
+
+        if file and allowed_file(file.filename):
+            filename = secure_filename(file.filename)
+            ext = filename.rsplit('.', 1)[1].lower()
+            unique_name = f"{uuid4()}.{ext}"
+            save_path = os.path.join(app.root_path, 'static', 'profile_pics', unique_name)
+            file.save(save_path)
+
+            # Update user record
+            current_user.image_file = unique_name
+            db.session.commit()
+            flash('Profile picture updated.', 'success')
+            return redirect(url_for('profile'))
+        else:
+            flash('Invalid file type. Allowed: png, jpg, jpeg', 'danger')
+            return redirect(url_for('profile'))
+
+    return render_template('profile.html')
+
+@app.route('/download/file_uuid', methods=['POST'])
+@login_required
+def download_file(file_uuid):
     password = request.form.get('password_verify')
-    req = AccessRequest.query.get_or_404(request_id)
+    req = AccessRequest.query.get_or_404(file_uuid)
     
     if req.consultant_id != current_user.id or req.status != 'approved':
         return redirect(url_for('dashboard'))
