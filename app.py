@@ -1,6 +1,7 @@
 import os
 import json
 import base64
+import time
 from flask import Flask, render_template, url_for, redirect, request, flash, send_file, Response
 from werkzeug.utils import secure_filename
 from uuid import uuid4
@@ -160,6 +161,22 @@ class File(db.Model):
     
     # The AES key encrypted with the OWNER'S Public Key
     encrypted_aes_key = db.Column(db.Text, nullable=False)
+
+class FilePermission(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    file_id = db.Column(db.Integer, db.ForeignKey('file.id'), nullable=False)
+    shared_with_user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    file = db.relationship('File', backref=db.backref('permissions', lazy=True))
+    user = db.relationship('User', backref=db.backref('shared_files', lazy=True))
+
+class BenchmarkResult(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    file_id = db.Column(db.Integer, db.ForeignKey('file.id'), nullable=False)
+    algo = db.Column(db.String(50), nullable=False)
+    enc_time_ms = db.Column(db.Float, nullable=False)
+    dec_time_ms = db.Column(db.Float, nullable=False)
+    ciphertext_size = db.Column(db.Integer, nullable=False)
+    file = db.relationship('File', backref=db.backref('benchmark_results', lazy=True))
 
 class AccessRequest(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -372,40 +389,263 @@ def profile():
 
     return render_template('profile.html')
 
-@app.route('/download/file_uuid', methods=['POST'])
+@app.route('/download/<int:file_id>', methods=['GET', 'POST'])
+@app.route('/download/request/<int:request_id>', methods=['POST'])
 @login_required
-def download_file(file_uuid):
-    password = request.form.get('password_verify')
-    req = AccessRequest.query.get_or_404(file_uuid)
+def download_file(file_id=None, request_id=None):
+    """
+    Supports two download flows:
+    - Owner download: `GET/POST /download/<file_id>` where owner provides password to decrypt their file.
+    - Consultant download: `POST /download/request/<request_id>` where consultant provides password to decrypt shared AES key.
+    """
+    # --- Owner flow (organization) ---
+    if file_id is not None and current_user.role == 'organization':
+        file_record = File.query.get_or_404(file_id)
+        if file_record.owner_id != current_user.id:
+            flash('You are not authorized to download this file.', 'danger')
+            return redirect(url_for('dashboard'))
+
+        if request.method == 'GET':
+            return render_template('confirm_download.html', file_id=file_id, filename=file_record.filename)
+
+        # POST: attempt decrypt using owner's private key
+        password = request.form.get('password_verify')
+        enc_priv_pem = get_private_key_from_nosql(current_user.id)
+        try:
+            owner_private_key = load_private_key(enc_priv_pem, password)
+            aes_key = decrypt_rsa(file_record.encrypted_aes_key, owner_private_key)
+
+            with open(file_record.filepath, 'rb') as f:
+                encrypted_file_data = f.read()
+
+            decrypted_data = decrypt_aes_gcm(encrypted_file_data, aes_key)
+            return Response(
+                decrypted_data,
+                mimetype="application/octet-stream",
+                headers={"Content-disposition": f"attachment; filename={file_record.filename}"}
+            )
+        except Exception:
+            flash('Incorrect password or decryption failure.', 'danger')
+            return redirect(url_for('dashboard'))
+
+    # --- Consultant flow ---
+    if request_id is not None and current_user.role == 'consultant':
+        # Consultants must POST with password
+        if request.method != 'POST':
+            return redirect(url_for('my_access'))
+
+        password = request.form.get('password_verify')
+        req = AccessRequest.query.get_or_404(request_id)
+
+        if req.consultant_id != current_user.id or req.status != 'approved':
+            return redirect(url_for('dashboard'))
+
+        enc_priv_pem = get_private_key_from_nosql(current_user.id)
+        try:
+            consultant_private_key = load_private_key(enc_priv_pem, password)
+            aes_key = decrypt_rsa(req.encrypted_shared_key, consultant_private_key)
+
+            with open(req.file.filepath, 'rb') as f:
+                encrypted_file_data = f.read()
+
+            decrypted_data = decrypt_aes_gcm(encrypted_file_data, aes_key)
+            return Response(
+                decrypted_data,
+                mimetype="application/octet-stream",
+                headers={"Content-disposition": f"attachment; filename={req.file.filename}"}
+            )
+        except Exception:
+            flash('Incorrect password or decryption failure.', 'danger')
+            return redirect(url_for('my_access'))
+
+    # If nothing matched
+    return redirect(url_for('dashboard'))
     
-    if req.consultant_id != current_user.id or req.status != 'approved':
+# File Sharing
+@app.route('/share', methods=['POST'])
+@login_required
+def share_file():
+    recipient_username = request.form['username']
+    file_id = request.form['file_id']
+    
+    # Validate file and recipient
+    file_to_share = File.query.get_or_404(file_id)
+    
+    # Check if current user is the owner
+    if file_to_share.owner_id != current_user.id:
+        flash('You can only share files you own.', 'danger')
         return redirect(url_for('dashboard'))
 
-    # 1. Get Consultant's Encrypted Private Key from NoSQL
-    enc_priv_pem = get_private_key_from_nosql(current_user.id)
     
-    try:
-        # 2. Decrypt Consultant Private Key
-        consultant_private_key = load_private_key(enc_priv_pem, password)
+    # Find recipient user 
+    recipient = User.query.filter_by(username=recipient_username).first()
+    
+    #  if shared user is consultant, denyt access
+    if recipient.role == 'consultant':
+        flash('You can only share files with organization users.', 'danger')
+        return redirect(url_for('dashboard'))
+
+    # Recipient not found
+    if not recipient:
+        flash(f'User "{recipient_username}" not found.', 'danger')
+        return redirect(url_for('dashboard'))
         
-        # 3. Decrypt the Shared AES Key
-        aes_key = decrypt_rsa(req.encrypted_shared_key, consultant_private_key)
-        
-        # 4. Decrypt the File
-        with open(req.file.filepath, 'rb') as f:
-            encrypted_file_data = f.read()
-        
-        decrypted_data = decrypt_aes_gcm(encrypted_file_data, aes_key)
-        
-        return Response(
-            decrypted_data,
-            mimetype="application/octet-stream",
-            headers={"Content-disposition": f"attachment; filename={req.file.filename}"}
+    # Check if already shared
+    existing_permission = FilePermission.query.filter_by(
+        file_id=file_id,
+        shared_with_user_id=recipient.id
+    ).first()
+    
+    if existing_permission:
+        flash(f'File already shared with {recipient_username}.', 'info')
+        return redirect(url_for('dashboard'))
+
+    # Save new permission to DB
+    new_permission = FilePermission( file_id=file_id, shared_with_user_id=recipient.id )
+    db.session.add(new_permission)
+    db.session.commit()
+    
+    flash(f'File successfully shared with {recipient_username}.', 'success')
+    return redirect(url_for('dashboard'))
+
+# Benchmarking
+def run_benchmark(data):
+    results = []
+    
+    # AES-256-CTR
+    key = os.urandom(32)
+    nonce = os.urandom(16)
+    cipher_aes = Cipher(algorithms.AES(key), modes.CTR(nonce), backend=default_backend())
+
+    # Encryption time
+    start = time.perf_counter()
+    encryptor_aes = cipher_aes.encryptor()
+    ct_aes = encryptor_aes.update(data) + encryptor_aes.finalize()
+    enc_time = (time.perf_counter() - start) * 1000 # ms
+    
+    # Decryption time
+    start = time.perf_counter()
+    decryptor_aes = cipher_aes.decryptor()
+    pt_aes = decryptor_aes.update(ct_aes) + decryptor_aes.finalize()
+    dec_time = (time.perf_counter() - start) * 1000 # ms
+    
+    # Store results
+    results.append({
+        'algo': 'AES-256-CTR',
+        'enc_time_ms': f"{enc_time:.2f}",
+        'dec_time_ms': f"{dec_time:.2f}",
+        'ciphertext_size': len(ct_aes)
+    })
+    
+    # DES-CBC (with padding)
+    key = os.urandom(24)
+    iv = os.urandom(8)
+    cipher_des = Cipher(algorithms.TripleDES(key), modes.CBC(iv), backend=default_backend())
+    padder = padding.PKCS7(algorithms.TripleDES.block_size).padder()
+
+    # Encryption time
+    start = time.perf_counter()
+    encryptor_des = cipher_des.encryptor()
+    padded_data = padder.update(data) + padder.finalize()
+    ct_des = encryptor_des.update(padded_data) + encryptor_des.finalize()
+    enc_time = (time.perf_counter() - start) * 1000 # ms
+    
+    # Decryption time
+    start = time.perf_counter()
+    decryptor_des = cipher_des.decryptor()
+    pt_padded = decryptor_des.update(ct_des) + decryptor_des.finalize()
+    unpadder = padding.PKCS7(algorithms.TripleDES.block_size).unpadder()
+    pt_des = unpadder.update(pt_padded) + unpadder.finalize()
+    dec_time = (time.perf_counter() - start) * 1000 # ms
+
+    # Store results
+    results.append({
+        'algo': '3DES-CBC',
+        'enc_time_ms': f"{enc_time:.2f}",
+        'dec_time_ms': f"{dec_time:.2f}",
+        'ciphertext_size': len(ct_des)
+    })
+    
+    # RC4-128
+    key = os.urandom(16)
+    cipher_rc4 = Cipher(algorithms.ARC4(key), mode=None, backend=default_backend())
+
+    # Encryption time
+    start = time.perf_counter()
+    encryptor_rc4 = cipher_rc4.encryptor()
+    ct_rc4 = encryptor_rc4.update(data) + encryptor_rc4.finalize()
+    enc_time = (time.perf_counter() - start) * 1000 # ms
+    
+    # Decryption time
+    start = time.perf_counter()
+    decryptor_rc4 = cipher_rc4.decryptor()
+    pt_rc4 = decryptor_rc4.update(ct_rc4) + decryptor_rc4.finalize()
+    dec_time = (time.perf_counter() - start) * 1000 # ms
+
+    # Store results
+    results.append({
+        'algo': 'RC4-128',
+        'enc_time_ms': f"{enc_time:.2f}",
+        'dec_time_ms': f"{dec_time:.2f}",
+        'ciphertext_size': len(ct_rc4)
+    })
+    
+    return results
+
+# Benchmarking Page
+@app.route('/benchmark_file/<int:file_id>')
+@login_required
+def benchmark_file(file_id):
+    # Get file record from DB
+    file_record = File.query.get_or_404(file_id)
+
+    # Check permission
+    if file_record.owner_id != current_user.id:
+        flash('You do not have permission to benchmark this file.', 'danger')
+        return redirect(url_for('dashboard'))
+
+    # Check whether benchmark results already exist in DB
+    existing_results = file_record.benchmark_results
+
+    # If they exist, render them directly
+    if existing_results:
+        flash('Benchmark results loaded from cache.', 'info')
+        # Use available filename and filesize (fallback to encrypted file size)
+        try:
+            filesize = os.path.getsize(file_record.filepath)
+        except Exception:
+            filesize = None
+        return render_template(
+            'benchmark_result.html', 
+            results=existing_results,
+            filename=file_record.filename,
+            filesize=filesize
         )
 
-    except Exception as e:
-        flash('Incorrect password or decryption failure.', 'danger')
-        return redirect(url_for('my_access'))
+    # If not, show loading page and trigger benchmark
+    return render_template(
+        'benchmark_loading.html',
+        file_id=file_id 
+    )
+
+# Execute Benchmarking
+@app.route('/_run_benchmark/<int:file_id>')
+@login_required
+def execute_benchmark(file_id):
+    # Get file record from DB
+    file_record = File.query.get_or_404(file_id)
+
+    # Check permission
+    if file_record.owner_id != current_user.id:
+        flash('Access denied', 'danger')
+        return redirect(url_for('dashboard'))
+    
+    # NOTE: The File model currently stores only the encrypted file path and not
+    # the decryption parameters required to obtain plaintext for benchmarking.
+    # For now we will attempt to read the stored file and run the benchmark on
+    # the decrypted content is not available; therefore we surface a message.
+    flash('Benchmarking is not available for this file (missing decryption metadata).', 'warning')
+    return redirect(url_for('dashboard'))
 
 if __name__ == '__main__':
     with app.app_context():
