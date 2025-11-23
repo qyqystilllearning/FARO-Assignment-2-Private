@@ -2,7 +2,7 @@ import os
 import json
 import base64
 import time
-from flask import Flask, render_template, url_for, redirect, request, flash, send_file, Response
+from flask import Flask, render_template, url_for, redirect, request, flash, send_file, Response, session
 from werkzeug.utils import secure_filename
 from uuid import uuid4
 from flask_sqlalchemy import SQLAlchemy
@@ -10,8 +10,10 @@ from flask_login import UserMixin, login_user, LoginManager, login_required, log
 from flask_bcrypt import Bcrypt
 
 # --- CRYPTOGRAPHY IMPORTS ---
-from cryptography.hazmat.primitives.asymmetric import rsa, padding
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.asymmetric import padding as asym_padding # Rename for clarity
 from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives import padding as sym_padding # Rename for clarity
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
 
@@ -33,7 +35,6 @@ os.makedirs(app.config['KEYSTORE_FOLDER'], exist_ok=True)
 
 # ==========================================
 #  HELPER: NoSQL Key Storage (Requirement #4)
-#  This acts as your NoSQL Database Driver
 # ==========================================
 KEYSTORE_PATH = os.path.join(app.config['KEYSTORE_FOLDER'], 'private_keys.json')
 
@@ -96,10 +97,10 @@ def load_private_key(encrypted_pem_str, password):
 def encrypt_rsa(data, public_key_pem):
     """Encrypts a symmetric key using an RSA Public Key."""
     public_key = serialization.load_pem_public_key(public_key_pem, backend=default_backend())
-    ciphertext = public_key.encrypt(
+    ciphertext = public_key.encrypt( 
         data,
-        padding.OAEP(
-            mgf=padding.MGF1(algorithm=hashes.SHA256()),
+        asym_padding.OAEP(
+            mgf=asym_padding.MGF1(algorithm=hashes.SHA256()),
             algorithm=hashes.SHA256(),
             label=None
         )
@@ -111,8 +112,8 @@ def decrypt_rsa(encrypted_b64, private_key):
     ciphertext = base64.b64decode(encrypted_b64)
     plaintext = private_key.decrypt(
         ciphertext,
-        padding.OAEP(
-            mgf=padding.MGF1(algorithm=hashes.SHA256()),
+        asym_padding.OAEP(
+            mgf=asym_padding.MGF1(algorithm=hashes.SHA256()),
             algorithm=hashes.SHA256(),
             label=None
         )
@@ -508,113 +509,97 @@ def share_file():
     flash(f'File successfully shared with {recipient_username}.', 'success')
     return redirect(url_for('dashboard'))
 
-# Benchmarking
+# ... (Import dan kode lain di atas tetap sama) ...
+
+# ==========================================
+#  BENCHMARK LOGIC (AES, DES, RC4)
+# ==========================================
+
 def run_benchmark(data):
+    """
+    Runs encryption/decryption tests on raw data using 3 algorithms.
+    """
     results = []
     
-    # AES-256-CTR
-    key = os.urandom(32)
-    nonce = os.urandom(16)
-    cipher_aes = Cipher(algorithms.AES(key), modes.CTR(nonce), backend=default_backend())
+    # 1. AES-256-CTR
+    key_aes = os.urandom(32)
+    nonce_aes = os.urandom(16)
+    cipher_aes = Cipher(algorithms.AES(key_aes), modes.CTR(nonce_aes), backend=default_backend())
+    
+    start = time.perf_counter()
+    encryptor = cipher_aes.encryptor()
+    ct = encryptor.update(data) + encryptor.finalize()
+    enc_time = (time.perf_counter() - start) * 1000
+    
+    start = time.perf_counter()
+    decryptor = cipher_aes.decryptor()
+    pt = decryptor.update(ct) + decryptor.finalize()
+    dec_time = (time.perf_counter() - start) * 1000
+    
+    results.append({'algo': 'AES-256-CTR', 'enc_time_ms': enc_time, 'dec_time_ms': dec_time, 'ciphertext_size': len(ct)})
 
-    # Encryption time
-    start = time.perf_counter()
-    encryptor_aes = cipher_aes.encryptor()
-    ct_aes = encryptor_aes.update(data) + encryptor_aes.finalize()
-    enc_time = (time.perf_counter() - start) * 1000 # ms
+    # 2. 3DES-CBC (Triple DES)
+    key_des = os.urandom(24)
+    iv_des = os.urandom(8)
+    cipher_des = Cipher(algorithms.TripleDES(key_des), modes.CBC(iv_des), backend=default_backend())
+    # FIX: Use sym_padding for symmetric encryption padding
+    padder = sym_padding.PKCS7(algorithms.TripleDES.block_size).padder()
     
-    # Decryption time
     start = time.perf_counter()
-    decryptor_aes = cipher_aes.decryptor()
-    pt_aes = decryptor_aes.update(ct_aes) + decryptor_aes.finalize()
-    dec_time = (time.perf_counter() - start) * 1000 # ms
+    encryptor = cipher_des.encryptor()
+    padded_data = padder.update(data) + padder.finalize() # CBC needs padding
+    ct = encryptor.update(padded_data) + encryptor.finalize()
+    enc_time = (time.perf_counter() - start) * 1000
     
-    # Store results
-    results.append({
-        'algo': 'AES-256-CTR',
-        'enc_time_ms': f"{enc_time:.2f}",
-        'dec_time_ms': f"{dec_time:.2f}",
-        'ciphertext_size': len(ct_aes)
-    })
-    
-    # DES-CBC (with padding)
-    key = os.urandom(24)
-    iv = os.urandom(8)
-    cipher_des = Cipher(algorithms.TripleDES(key), modes.CBC(iv), backend=default_backend())
-    padder = padding.PKCS7(algorithms.TripleDES.block_size).padder()
-
-    # Encryption time
     start = time.perf_counter()
-    encryptor_des = cipher_des.encryptor()
-    padded_data = padder.update(data) + padder.finalize()
-    ct_des = encryptor_des.update(padded_data) + encryptor_des.finalize()
-    enc_time = (time.perf_counter() - start) * 1000 # ms
+    decryptor = cipher_des.decryptor()
+    pt_padded = decryptor.update(ct) + decryptor.finalize()
+    # FIX: Use sym_padding for unpadding
+    unpadder = sym_padding.PKCS7(algorithms.TripleDES.block_size).unpadder()
+    pt = unpadder.update(pt_padded) + unpadder.finalize()
+    dec_time = (time.perf_counter() - start) * 1000
     
-    # Decryption time
-    start = time.perf_counter()
-    decryptor_des = cipher_des.decryptor()
-    pt_padded = decryptor_des.update(ct_des) + decryptor_des.finalize()
-    unpadder = padding.PKCS7(algorithms.TripleDES.block_size).unpadder()
-    pt_des = unpadder.update(pt_padded) + unpadder.finalize()
-    dec_time = (time.perf_counter() - start) * 1000 # ms
-
-    # Store results
-    results.append({
-        'algo': '3DES-CBC',
-        'enc_time_ms': f"{enc_time:.2f}",
-        'dec_time_ms': f"{dec_time:.2f}",
-        'ciphertext_size': len(ct_des)
-    })
+    results.append({'algo': '3DES-CBC', 'enc_time_ms': enc_time, 'dec_time_ms': dec_time, 'ciphertext_size': len(ct)})
     
-    # RC4-128
-    key = os.urandom(16)
-    cipher_rc4 = Cipher(algorithms.ARC4(key), mode=None, backend=default_backend())
-
-    # Encryption time
-    start = time.perf_counter()
-    encryptor_rc4 = cipher_rc4.encryptor()
-    ct_rc4 = encryptor_rc4.update(data) + encryptor_rc4.finalize()
-    enc_time = (time.perf_counter() - start) * 1000 # ms
+    # 3. RC4 (ARC4)
+    key_rc4 = os.urandom(16)
+    cipher_rc4 = Cipher(algorithms.ARC4(key_rc4), mode=None, backend=default_backend())
     
-    # Decryption time
     start = time.perf_counter()
-    decryptor_rc4 = cipher_rc4.decryptor()
-    pt_rc4 = decryptor_rc4.update(ct_rc4) + decryptor_rc4.finalize()
-    dec_time = (time.perf_counter() - start) * 1000 # ms
-
-    # Store results
-    results.append({
-        'algo': 'RC4-128',
-        'enc_time_ms': f"{enc_time:.2f}",
-        'dec_time_ms': f"{dec_time:.2f}",
-        'ciphertext_size': len(ct_rc4)
-    })
+    encryptor = cipher_rc4.encryptor()
+    ct = encryptor.update(data) + encryptor.finalize()
+    enc_time = (time.perf_counter() - start) * 1000
+    
+    start = time.perf_counter()
+    decryptor = cipher_rc4.decryptor()
+    pt = decryptor.update(ct) + decryptor.finalize()
+    dec_time = (time.perf_counter() - start) * 1000
+    
+    results.append({'algo': 'RC4-128', 'enc_time_ms': enc_time, 'dec_time_ms': dec_time, 'ciphertext_size': len(ct)})
     
     return results
 
-# Benchmarking Page
-@app.route('/benchmark_file/<int:file_id>')
+
+# Route untuk Mengecek Cache / Meminta Auth
+@app.route('/benchmark_file/<int:file_id>', methods=['GET'])
 @login_required
 def benchmark_file(file_id):
-    # Get file record from DB
     file_record = File.query.get_or_404(file_id)
 
-    # Check permission
+    # Cek Izin
     if file_record.owner_id != current_user.id:
         flash('You do not have permission to benchmark this file.', 'danger')
         return redirect(url_for('dashboard'))
 
-    # Check whether benchmark results already exist in DB
+    # 1. Cek Cache di Database
     existing_results = file_record.benchmark_results
-
-    # If they exist, render them directly
     if existing_results:
         flash('Benchmark results loaded from cache.', 'info')
-        # Use available filename and filesize (fallback to encrypted file size)
         try:
             filesize = os.path.getsize(file_record.filepath)
-        except Exception:
-            filesize = None
+        except:
+            filesize = "Unknown"
+            
         return render_template(
             'benchmark_result.html', 
             results=existing_results,
@@ -622,30 +607,64 @@ def benchmark_file(file_id):
             filesize=filesize
         )
 
-    # If not, show loading page and trigger benchmark
-    return render_template(
-        'benchmark_loading.html',
-        file_id=file_id 
-    )
+    # 2. Jika Cache Kosong: Minta Password
+    return render_template('benchmark_auth.html', file_id=file_id, filename=file_record.filename)
 
-# Execute Benchmarking
-@app.route('/_run_benchmark/<int:file_id>')
+
+# Route Eksekusi (POST password -> Decrypt -> Benchmark)
+@app.route('/execute_benchmark/<int:file_id>', methods=['POST'])
 @login_required
 def execute_benchmark(file_id):
-    # Get file record from DB
+    password = request.form.get('password_verify')
     file_record = File.query.get_or_404(file_id)
 
-    # Check permission
     if file_record.owner_id != current_user.id:
-        flash('Access denied', 'danger')
         return redirect(url_for('dashboard'))
+
+    # 1. Ambil Kunci Privat Terenkripsi dari NoSQL
+    enc_priv_pem = get_private_key_from_nosql(current_user.id)
     
-    # NOTE: The File model currently stores only the encrypted file path and not
-    # the decryption parameters required to obtain plaintext for benchmarking.
-    # For now we will attempt to read the stored file and run the benchmark on
-    # the decrypted content is not available; therefore we surface a message.
-    flash('Benchmarking is not available for this file (missing decryption metadata).', 'warning')
-    return redirect(url_for('dashboard'))
+    try:
+        # 2. Buka Kunci Privat User (Decrypt pakai password)
+        owner_private_key = load_private_key(enc_priv_pem, password)
+        
+        # 3. Buka Kunci AES File (Decrypt RSA pakai Private Key)
+        aes_key = decrypt_rsa(file_record.encrypted_aes_key, owner_private_key)
+
+        # 4. Baca File & Dekripsi menjadi Plaintext
+        with open(file_record.filepath, 'rb') as f:
+            encrypted_file_data = f.read()
+        
+        # Dekripsi file menggunakan kunci AES yang sudah dibuka
+        plaintext = decrypt_aes_gcm(encrypted_file_data, aes_key)
+
+        # 5. Jalankan Benchmark (Balapan 3 Algoritma) pada data asli
+        new_results_list = run_benchmark(plaintext)
+
+        # 6. Simpan Hasil ke Database (Cache)
+        for res in new_results_list:
+            new_db_entry = BenchmarkResult(
+                file_id=file_record.id,
+                algo=res['algo'],
+                enc_time_ms=float(res['enc_time_ms']),
+                dec_time_ms=float(res['dec_time_ms']),
+                ciphertext_size=res['ciphertext_size']
+            )
+            db.session.add(new_db_entry)
+        
+        db.session.commit()
+
+        # 7. Tampilkan Hasil
+        return render_template(
+            'benchmark_result.html', 
+            results=file_record.benchmark_results, 
+            filename=file_record.filename,
+            filesize=len(plaintext)
+        )
+
+    except Exception as e:
+        flash(f'Benchmark failed. Incorrect password or decryption error: {e}', 'danger')
+        return redirect(url_for('dashboard'))
 
 if __name__ == '__main__':
     with app.app_context():

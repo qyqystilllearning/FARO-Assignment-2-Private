@@ -1,0 +1,37 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-md-6">
+        <div class="card shadow border-warning">
+            <div class="card-header bg-warning text-dark">
+                <strong>Authorize Benchmark Analysis</strong>
+            </div>
+            <div class="card-body">
+                <p class="card-text">
+                    To analyze <strong>{{ filename }}</strong>, the system needs to decrypt it first using your Secure Private Key.
+                </p>
+                <div class="alert alert-light border">
+                    <small class="text-muted">
+                        <i class="bi bi-shield-lock"></i> 
+                        Your key is stored securely in NoSQL storage and encrypted with your password.
+                    </small>
+                </div>
+                
+                <form action="{{ url_for('execute_benchmark', file_id=file_id) }}" method="POST">
+                    <div class="mb-3">
+                        <label class="form-label">Enter Password to Unlock Key</label>
+                        <input type="password" name="password_verify" class="form-control" placeholder="Your login password" required>
+                    </div>
+                    <div class="d-grid gap-2">
+                        <button type="submit" class="btn btn-warning">
+                            Decrypt & Run Benchmark
+                        </button>
+                        <a href="{{ url_for('dashboard') }}" class="btn btn-outline-secondary">Cancel</a>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+```
