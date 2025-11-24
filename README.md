@@ -43,18 +43,18 @@ Additionally, the application includes a **Cryptography Benchmark Module** that 
 
 ## Key Features
 
-* 🔐 **Secure Authentication:** User registration and login with hashed passwords (`bcrypt`).
-* 👥 **Role-Based Access Control (RBAC):**
+* **Secure Authentication:** User registration and login with hashed passwords (`bcrypt`).
+* **Role-Based Access Control (RBAC):**
     * **Organization:** Can upload files, view requests, and approve access.
     * **Consultant:** Can view available files, request access, and download shared files.
-* 📂 **Secure File Storage:** Files are encrypted upon upload using **AES-GCM**.
-* 🔑 **Hybrid Key Management:**
+* **Secure File Storage:** Files are encrypted upon upload using **AES-GCM**.
+* **Hybrid Key Management:**
     * **AES Keys** are encrypted using the owner's **RSA Public Key** and stored in SQLite.
     * **RSA Private Keys** are encrypted with the user's password and stored in a simulated NoSQL store (`JSON`).
-* 🤝 **Secure File Sharing:**
+* **Secure File Sharing:**
     * Implements a secure key exchange mechanism.
     * When a request is approved, the file's AES key is decrypted and re-encrypted with the *Consultant's* Public Key.
-* 📊 **Crypto Benchmarking:** Built-in tool to measure encryption/decryption speed and ciphertext size.
+* **Crypto Benchmarking:** Built-in tool to measure encryption/decryption speed and ciphertext size.
 
 ---
 
