@@ -155,7 +155,3 @@ The project includes a benchmarking feature accessible via the file dashboard. I
 | RC4       | Stream | 128-bit  | Speed (ms) & Size   |
 
 **Note:** Results are cached in the database to avoid redundant processing.
-
-## License
-
-This project is licensed under the MIT License.
