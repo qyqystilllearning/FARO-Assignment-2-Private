@@ -578,20 +578,17 @@ def run_benchmark(data):
     results.append({'algo': 'RC4-128', 'enc_time_ms': enc_time, 'dec_time_ms': dec_time, 'ciphertext_size': len(ct)})
     
     return results
-
-
-# Route untuk Mengecek Cache / Meminta Auth
+# 1. Route Awal: Cek Cache
 @app.route('/benchmark_file/<int:file_id>', methods=['GET'])
 @login_required
 def benchmark_file(file_id):
     file_record = File.query.get_or_404(file_id)
 
-    # Cek Izin
     if file_record.owner_id != current_user.id:
-        flash('You do not have permission to benchmark this file.', 'danger')
+        flash('Access denied.', 'danger')
         return redirect(url_for('dashboard'))
 
-    # 1. Cek Cache di Database
+    # Cek Cache
     existing_results = file_record.benchmark_results
     if existing_results:
         flash('Benchmark results loaded from cache.', 'info')
@@ -599,49 +596,80 @@ def benchmark_file(file_id):
             filesize = os.path.getsize(file_record.filepath)
         except:
             filesize = "Unknown"
-            
-        return render_template(
-            'benchmark_result.html', 
-            results=existing_results,
-            filename=file_record.filename,
-            filesize=filesize
-        )
+        return render_template('benchmark_result.html', results=existing_results, filename=file_record.filename, filesize=filesize)
 
-    # 2. Jika Cache Kosong: Minta Password
+    # Jika Cache Kosong -> Ke Halaman Auth
     return render_template('benchmark_auth.html', file_id=file_id, filename=file_record.filename)
 
 
-# Route Eksekusi (POST password -> Decrypt -> Benchmark)
-@app.route('/execute_benchmark/<int:file_id>', methods=['POST'])
+# 2. Route Perantara: Verifikasi Password & Set Session
+@app.route('/verify_benchmark/<int:file_id>', methods=['POST'])
 @login_required
-def execute_benchmark(file_id):
+def verify_benchmark(file_id):
     password = request.form.get('password_verify')
-    file_record = File.query.get_or_404(file_id)
-
-    if file_record.owner_id != current_user.id:
-        return redirect(url_for('dashboard'))
-
-    # 1. Ambil Kunci Privat Terenkripsi dari NoSQL
+    
+    # Ambil Kunci dari NoSQL
     enc_priv_pem = get_private_key_from_nosql(current_user.id)
     
     try:
-        # 2. Buka Kunci Privat User (Decrypt pakai password)
+        # Coba Decrypt Private Key
+        # Kita lakukan ini HANYA untuk memverifikasi password benar
+        # DAN untuk menyimpannya sementara di session agar route 'execute' bisa membacanya
         owner_private_key = load_private_key(enc_priv_pem, password)
         
-        # 3. Buka Kunci AES File (Decrypt RSA pakai Private Key)
+        # Simpan kunci privat yang sudah terbuka (PEM String) ke session
+        # Ini aman karena session Flask di-sign dengan SECRET_KEY
+        private_key_pem_string = owner_private_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption()
+        ).decode('utf-8')
+        
+        session['temp_benchmark_key'] = private_key_pem_string
+        
+        # Password Benar -> Ke Halaman Loading
+        return render_template('benchmark_loading.html', file_id=file_id)
+
+    except Exception as e:
+        flash('Incorrect password. Cannot unlock Private Key.', 'danger')
+        return redirect(url_for('dashboard'))
+
+
+# 3. Route Eksekusi: Dijalankan otomatis oleh Halaman Loading
+@app.route('/execute_benchmark/<int:file_id>')
+@login_required
+def execute_benchmark(file_id):
+    file_record = File.query.get_or_404(file_id)
+    
+    # Ambil kunci dari session (yang disimpan di langkah sebelumnya)
+    private_key_pem = session.get('temp_benchmark_key')
+    
+    if not private_key_pem:
+        flash('Session expired or invalid flow.', 'danger')
+        return redirect(url_for('dashboard'))
+
+    try:
+        # Load Kunci Privat dari Session
+        owner_private_key = serialization.load_pem_private_key(
+            private_key_pem.encode('utf-8'),
+            password=None,
+            backend=default_backend()
+        )
+        
+        # Buka Amplop RSA (Dapatkan kunci AES)
         aes_key = decrypt_rsa(file_record.encrypted_aes_key, owner_private_key)
 
-        # 4. Baca File & Dekripsi menjadi Plaintext
+        # Buka File Fisik
         with open(file_record.filepath, 'rb') as f:
             encrypted_file_data = f.read()
         
-        # Dekripsi file menggunakan kunci AES yang sudah dibuka
+        # Dapatkan Plaintext
         plaintext = decrypt_aes_gcm(encrypted_file_data, aes_key)
 
-        # 5. Jalankan Benchmark (Balapan 3 Algoritma) pada data asli
+        # JALANKAN BENCHMARK (AES, DES, RC4)
         new_results_list = run_benchmark(plaintext)
 
-        # 6. Simpan Hasil ke Database (Cache)
+        # Simpan Cache
         for res in new_results_list:
             new_db_entry = BenchmarkResult(
                 file_id=file_record.id,
@@ -651,10 +679,11 @@ def execute_benchmark(file_id):
                 ciphertext_size=res['ciphertext_size']
             )
             db.session.add(new_db_entry)
-        
         db.session.commit()
 
-        # 7. Tampilkan Hasil
+        # BERSIHKAN SESSION (Penting untuk keamanan!)
+        session.pop('temp_benchmark_key', None)
+
         return render_template(
             'benchmark_result.html', 
             results=file_record.benchmark_results, 
@@ -663,9 +692,10 @@ def execute_benchmark(file_id):
         )
 
     except Exception as e:
-        flash(f'Benchmark failed. Incorrect password or decryption error: {e}', 'danger')
+        session.pop('temp_benchmark_key', None) # Bersihkan jika error
+        flash(f'Benchmark failed: {e}', 'danger')
         return redirect(url_for('dashboard'))
-
+    
 if __name__ == '__main__':
     with app.app_context():
         db.create_all()
