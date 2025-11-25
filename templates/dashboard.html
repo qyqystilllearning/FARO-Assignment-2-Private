@@ -171,13 +171,50 @@
     {% else %}
     <p class="no-files-message">No files have been shared with you.</p>
     {% endfor %}
+
+    <!-- NEW SECTION: Files you have shared with other organization users -->
+    <hr />
+    <h4>Shared Files</h4>
+    <p class="description">Files you shared with other organization users. You can revoke access here.</p>
+
+    {% if shared_permissions %}
+      {% for perm in shared_permissions %}
+      <div class="file-item-card">
+        {% set ext = perm.file.filename.split('.')[-1] | lower %}
+        <i
+          class="fa-solid {% if ext == 'xlsx' or ext == 'xls' %} fa-file-excel file-icon excel {% elif ext == 'pdf' %} fa-file-pdf file-icon pdf {% elif ext == 'png' or ext == 'jpg' or ext == 'jpeg' %} fa-file-image file-icon image {% else %} fa-file file-icon other {% endif %}"
+        ></i>
+
+        <div class="file-info">
+          <strong>{{ perm.file.filename }}</strong>
+          <small class="file-algo-tag">shared with: {{ perm.user.username }}</small>
+        </div>
+
+        <div class="file-actions">
+          <!-- Optionally allow owner to download the original file -->
+          <a href="{{ url_for('download_file', file_id=perm.file.id) }}" class="btn btn-action" title="Download">
+            <i class="fa-solid fa-download"></i>
+          </a>
+
+          <!-- Revoke sharing -->
+          <form action="{{ url_for('revoke_share', permission_id=perm.id) }}" method="POST" style="display:inline;">
+            <button type="submit" class="btn btn-action" title="Revoke share" onclick="return confirm('Revoke share for {{ perm.user.username }}?')">
+              <i class="fa-solid fa-user-slash"></i>
+            </button>
+          </form>
+        </div>
+      </div>
+      {% endfor %}
+    {% else %}
+      <p class="no-files-message">You haven't shared any files yet.</p>
+    {% endif %}
   </div>
-</div>
+
 
 <!-- TAMPILAN UNTUK CONSULTANT -->
 {% elif current_user.role == 'consultant' %}
 <div class="card">
-  <div class="card-header bg-info text-white">Available Organization Files</div>
+  <div class="card-header bg-dark text-white">Available Organization Files</div>
   <div class="card-body">
     <table class="table table-hover">
       <thead>

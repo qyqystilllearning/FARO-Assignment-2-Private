@@ -249,7 +249,11 @@ def dashboard():
     if current_user.role == 'organization':
         my_files = File.query.filter_by(owner_id=current_user.id).order_by(File.id.desc()).all()
         pending_requests = AccessRequest.query.join(File).filter(File.owner_id == current_user.id, AccessRequest.status == 'pending').all()
-        return render_template('dashboard.html', files=my_files, requests=pending_requests)
+
+        # NEW: fetch FilePermission rows for files owned by this organization user
+        shared_permissions = FilePermission.query.join(File).filter(File.owner_id == current_user.id).order_by(FilePermission.id.desc()).all()
+
+        return render_template('dashboard.html', files=my_files, requests=pending_requests, shared_permissions=shared_permissions)
     
     elif current_user.role == 'consultant':
         all_files = File.query.join(User).filter(User.role == 'organization').order_by(File.id.desc()).all()
@@ -462,7 +466,6 @@ def download_file(file_id=None, request_id=None):
     # If nothing matched
     return redirect(url_for('dashboard'))
     
-# File Sharing
 @app.route('/share', methods=['POST'])
 @login_required
 def share_file():
@@ -477,18 +480,17 @@ def share_file():
         flash('You can only share files you own.', 'danger')
         return redirect(url_for('dashboard'))
 
-    
     # Find recipient user 
     recipient = User.query.filter_by(username=recipient_username).first()
-    
-    #  if shared user is consultant, denyt access
-    if recipient.role == 'consultant':
-        flash('You can only share files with organization users.', 'danger')
-        return redirect(url_for('dashboard'))
 
-    # Recipient not found
+    # Recipient not found (check before using recipient.role)
     if not recipient:
         flash(f'User "{recipient_username}" not found.', 'danger')
+        return redirect(url_for('dashboard'))
+
+    # If shared user is consultant, deny access (you intended to only share with organization users)
+    if recipient.role == 'consultant':
+        flash('You can only share files with organization users.', 'danger')
         return redirect(url_for('dashboard'))
         
     # Check if already shared
@@ -507,6 +509,21 @@ def share_file():
     db.session.commit()
     
     flash(f'File successfully shared with {recipient_username}.', 'success')
+    return redirect(url_for('dashboard'))
+
+@app.route('/revoke_share/<int:permission_id>', methods=['POST'])
+@login_required
+def revoke_share(permission_id):
+    """Allow organization owner to revoke a previously created share (FilePermission)."""
+    perm = FilePermission.query.get_or_404(permission_id)
+    # Confirm the current user owns the file, otherwise unauthorized
+    if perm.file.owner_id != current_user.id:
+        flash('Unauthorized action.', 'danger')
+        return redirect(url_for('dashboard'))
+
+    db.session.delete(perm)
+    db.session.commit()
+    flash('Share revoked successfully.', 'success')
     return redirect(url_for('dashboard'))
 
 # ... (Import dan kode lain di atas tetap sama) ...
