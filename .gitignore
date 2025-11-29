@@ -1,0 +1,28 @@
+# --- Keamanan ---
+.env
+*.pem
+*.key
+id_rsa
+
+# --- Dependency ---
+node_modules/
+/venv
+__pycache__/
+/instance
+
+# --- System & IDE ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# --- Logs & Databases ---
+.log
+.sqlite
+.db
+
+# --- Build Output ---
+/dist
+/build
+/uploads
+

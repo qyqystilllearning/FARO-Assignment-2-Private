@@ -1,0 +1,26 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-md-6">
+        <div class="card shadow border-dark">
+            <div class="card-header bg-dark text-white">
+                <strong>Authorize Benchmark</strong>
+            </div>
+            <div class="card-body">
+                <p>To run a performance analysis on <strong>{{ filename }}</strong>, we need to decrypt it first.</p>
+                
+                <form action="{{ url_for('verify_benchmark', file_id=file_id) }}" method="POST">
+                    <div class="mb-3">
+                        <label class="form-label">Password</label>
+                        <input type="password" name="password_verify" class="form-control" required>
+                    </div>
+                    <div class="d-grid gap-2">
+                        <button type="submit" class="btn btn-dark">Decrypt & Run Analysis</button>
+                        <a href="{{ url_for('dashboard') }}" class="btn btn-outline-secondary">Cancel</a>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

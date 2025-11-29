@@ -1,0 +1,357 @@
+{% extends "layout.html" %} {% block content %}
+
+<!-- TAMPILAN UNTUK ORGANIZATION -->
+{% if current_user.role == 'organization' %}
+<div class="file-section">
+  <h3>Upload</h3>
+  <p class="description">Encrypt and share your files to other users</p>
+
+  <div class="card upload-section">
+    <div class="card-body">
+      <form
+        action="{{ url_for('upload_file') }}"
+        method="POST"
+        enctype="multipart/form-data"
+        id="uploadForm"
+      >
+        <div id="drop-zone-container">
+          <label for="file" class="file-upload-label" id="drop-zone">
+            <i class="fa-solid fa-cloud-arrow-up"></i>
+            <span class="upload-text"
+              >Click here to upload your file or drag.</span
+            >
+            <span class="supported-formats"
+              >Supported Format: XLSX, PDF, PNG, JPEG (10mb each)</span
+            >
+            <input
+              class="form-control"
+              type="file"
+              id="file"
+              name="file"
+              required
+              style="display: none"
+            />
+          </label>
+        </div>
+
+        <div id="file-preview-container" style="display: none">
+          <div class="file-preview-box">
+            <div class="file-preview-details">
+              <i id="preview-icon" class="fa-solid fa-file"></i>
+              <div class="file-preview-info">
+                <span id="preview-filename">Filename.pdf</span>
+                <span id="preview-filesize">1.21 MB</span>
+              </div>
+            </div>
+            <button type="button" class="delete-btn" id="remove-file-btn">
+              <i class="fa-solid fa-trash-can"></i>
+            </button>
+          </div>
+        </div>
+
+        <div class="upload-options">
+          <button type="submit" class="btn btn-primary upload-encrypt-btn">
+            Upload and Encrypt
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<div class="file-sections-wrapper">
+  <div class="file-section">
+    <div class="file-section-header">
+      <div>
+        <h3>My Files:</h3>
+        <p class="description">Here are your uploaded files</p>
+      </div>
+    </div>
+
+    {% set ns = namespace(found_files=False) %} {% for file in files %} {% if
+    file.encryption_algorithm == current_filter %} {% set ns.found_files = True
+    %}
+    <div class="file-item-card">
+      {% set ext = file.filename.split('.')[-1] | lower %}
+      <i
+        class="fa-solid {% if ext == 'xlsx' or ext == 'xls' %} fa-file-excel file-icon excel {% elif ext == 'pdf' %} fa-file-pdf file-icon pdf {% elif ext == 'png' or ext == 'jpg' or ext == 'jpeg' %} fa-file-image file-icon image {% else %} fa-file file-icon other {% endif %}"
+      ></i>
+
+      <div class="file-info">
+        <strong>{{ file.filename }}</strong>
+      </div>
+
+      <form
+        action="{{ url_for('share_file') }}"
+        method="POST"
+        class="d-flex share-form"
+        id="share-form-{{ loop.index }}"
+      >
+        <input type="hidden" name="file_id" value="{{ file.id }}" />
+        <input
+          type="text"
+          class="form-control form-control-sm"
+          name="username"
+          placeholder="Share with..."
+          required
+        />
+      </form>
+
+      <div class="file-actions">
+    <button type="submit" form="share-form-{{ loop.index }}" class="btn btn-action" title="Share">
+        <i class="fa-solid fa-share-nodes"></i>
+    </button>
+
+    {% set ext = file.filename.split('.')[-1] | lower %}
+    {% if ext == 'pdf' %}
+        {% if not file.is_signed %}
+            <a href="{{ url_for('sign_pdf', file_id=file.id) }}" class="btn btn-action text-warning" title="Sign PDF">
+                <i class="fa-solid fa-file-signature"></i>
+            </a>
+        {% else %}
+            <span class="btn btn-action text-success" title="Signed (Verified)">
+                <i class="fa-solid fa-file-contract"></i>
+            </span>
+        {% endif %}
+
+        <a href="{{ url_for('verify_signature', file_id=file.id) }}" class="btn btn-action text-info" title="Verify Signature">
+            <i class="fa-solid fa-check-double"></i>
+        </a>
+    {% endif %}
+    <a href="{{ url_for('benchmark_file', file_id=file.id) }}" class="btn btn-action" title="Compare">
+        <i class="fa-solid fa-chart-line"></i>
+    </a>
+    <a href="{{ url_for('download_file', file_id=file.id) }}" class="btn btn-action download" title="Download">
+        <i class="fa-solid fa-download"></i>
+    </a>
+</div>
+
+    </div>
+    {% endif %} {% else %}
+    <p class="no-files-message">You have not uploaded any files.</p>
+    {% endfor %} {% if not ns.found_files and files %}
+    <p class="no-files-message">
+      No files found with the filter "{{ current_filter }}".
+    </p>
+    {% endif %}
+  </div>
+
+  <div class="file-section">
+    <h3>Access Requests:</h3>
+    <p class="description">
+      Enter password to approve and grant access to the consultant.
+    </p>
+
+    {% for req in requests %}
+    <div class="file-item-card">
+      {% set ext = req.file.filename.split('.')[-1] | lower %}
+      <i
+        class="fa-solid {% if ext == 'xlsx' or ext == 'xls' %} fa-file-excel file-icon excel {% elif ext == 'pdf' %} fa-file-pdf file-icon pdf {% elif ext == 'png' or ext == 'jpg' or ext == 'jpeg' %} fa-file-image file-icon image {% else %} fa-file file-icon other {% endif %}"
+      ></i>
+
+      <div class="file-info">
+        <strong>{{ req.file.filename }}</strong>
+        <small class="file-algo-tag"
+          >request by: {{ req.consultant.username }}</small
+        >
+      </div>
+
+      <div class="file-actions">
+        <form
+          action="{{ url_for('approve_request', request_id=req.id) }}"
+          method="POST"
+          class="share-form"
+        >
+          <input
+            type="password"
+            name="password_verify"
+            class="form-control form-control-sm"
+            placeholder="Confirm Password"
+            required
+          />
+          <button type="submit" class="btn btn-success btn-sm">Approve</button>
+        </form>
+      </div>
+    </div>
+    {% else %}
+    <p class="no-files-message">No files have been shared with you.</p>
+    {% endfor %}
+
+    <!-- NEW SECTION: Files you have shared with other organization users -->
+    <hr />
+    <h4>Shared Files</h4>
+    <p class="description">Files you shared with other organization users. You can revoke access here.</p>
+
+    {% if shared_permissions %}
+      {% for perm in shared_permissions %}
+      <div class="file-item-card">
+        {% set ext = perm.file.filename.split('.')[-1] | lower %}
+        <i
+          class="fa-solid {% if ext == 'xlsx' or ext == 'xls' %} fa-file-excel file-icon excel {% elif ext == 'pdf' %} fa-file-pdf file-icon pdf {% elif ext == 'png' or ext == 'jpg' or ext == 'jpeg' %} fa-file-image file-icon image {% else %} fa-file file-icon other {% endif %}"
+        ></i>
+
+        <div class="file-info">
+          <strong>{{ perm.file.filename }}</strong>
+          <small class="file-algo-tag">shared with: {{ perm.user.username }}</small>
+        </div>
+
+        <div class="file-actions">
+          <!-- Optionally allow owner to download the original file -->
+          <a href="{{ url_for('download_file', file_id=perm.file.id) }}" class="btn btn-action" title="Download">
+            <i class="fa-solid fa-download"></i>
+          </a>
+
+          <!-- Revoke sharing -->
+          <form action="{{ url_for('revoke_share', permission_id=perm.id) }}" method="POST" style="display:inline;">
+            <button type="submit" class="btn btn-action" title="Revoke share" onclick="return confirm('Revoke share for {{ perm.user.username }}?')">
+              <i class="fa-solid fa-user-slash"></i>
+            </button>
+          </form>
+        </div>
+      </div>
+      {% endfor %}
+    {% else %}
+      <p class="no-files-message">You haven't shared any files yet.</p>
+    {% endif %}
+  </div>
+
+
+{% elif current_user.role == 'consultant' %}
+<div class="card">
+  <div class="card-header bg-dark text-white">Available Organization Files</div>
+  <div class="card-body">
+    <table class="table table-hover">
+      <thead>
+        <tr>
+          <th>Filename</th>
+          <th>Organization</th>
+          <th>Status</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for file in all_files %}
+        <tr>
+          <td>{{ file.filename }}</td>
+          <td>{{ file.owner_id }} (ID)</td>
+          <td>
+            {% if my_requests.get(file.id) == 'pending' %}
+            <span class="badge bg-warning text-dark">Pending</span>
+            {% elif my_requests.get(file.id) == 'approved' %}
+            <span class="badge bg-success">Approved</span>
+            {% else %}
+            <span class="badge bg-secondary">None</span>
+            {% endif %}
+          </td>
+          <td>
+            {% if my_requests.get(file.id) == 'approved' %}
+            <a
+              href="{{ url_for('my_access') }}"
+              class="btn btn-sm btn-outline-success"
+              >Go to Downloads</a
+            >
+            
+            {% set ext = file.filename.split('.')[-1] | lower %}
+            {% if ext == 'pdf' %}
+                <a href="{{ url_for('verify_signature', file_id=file.id) }}" class="btn btn-sm btn-outline-info">Verify</a>
+            {% endif %}
+
+            {% elif my_requests.get(file.id) == 'pending' %}
+            <button class="btn btn-sm btn-secondary" disabled>Requested</button>
+            {% else %}
+            <a
+              href="{{ url_for('request_access', file_id=file.id) }}"
+              class="btn btn-sm btn-primary"
+              >Request Access</a
+            >
+            {% endif %}
+          </td>
+        </tr>
+        {% else %}
+        <tr>
+          <td colspan="4" class="text-center">
+            No files available from organizations.
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
+<script>
+  document.addEventListener("DOMContentLoaded", function () {
+    const uploadForm = document.getElementById("uploadForm");
+    const fileInput = document.getElementById("file");
+    const dropZone = document.getElementById("drop-zone");
+    const dropZoneContainer = document.getElementById("drop-zone-container");
+    const previewContainer = document.getElementById("file-preview-container");
+    const removeFileBtn = document.getElementById("remove-file-btn");
+
+    const previewIcon = document.getElementById("preview-icon");
+    const previewFilename = document.getElementById("preview-filename");
+    const previewFilesize = document.getElementById("preview-filesize");
+
+    function showPreview(file) {
+      dropZoneContainer.style.display = "none";
+      previewContainer.style.display = "block";
+
+      previewFilename.textContent = file.name;
+      previewFilesize.textContent =
+        (file.size / 1024 / 1024).toFixed(2) + " MB";
+
+      const ext = file.name.split(".").pop().toLowerCase();
+      previewIcon.className = "fa-solid file-icon-preview";
+      if (["xlsx", "xls"].includes(ext)) {
+        previewIcon.classList.add("fa-file-excel", "excel");
+      } else if (ext === "pdf") {
+        previewIcon.classList.add("fa-file-pdf", "pdf");
+      } else if (["png", "jpg", "jpeg"].includes(ext)) {
+        previewIcon.classList.add("fa-file-image", "image");
+      } else {
+        previewIcon.classList.add("fa-file", "other");
+      }
+    }
+
+    function hidePreview() {
+      fileInput.value = null;
+
+      previewContainer.style.display = "none";
+      dropZoneContainer.style.display = "block";
+    }
+
+    fileInput.addEventListener("change", () => {
+      if (fileInput.files.length > 0) {
+        showPreview(fileInput.files[0]);
+      }
+    });
+
+    removeFileBtn.addEventListener("click", hidePreview);
+
+    uploadForm.addEventListener("reset", hidePreview);
+
+    dropZone.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      dropZone.classList.add("drag-over");
+    });
+
+    dropZone.addEventListener("dragleave", () => {
+      dropZone.classList.remove("drag-over");
+    });
+
+    dropZone.addEventListener("drop", (e) => {
+      e.preventDefault();
+      dropZone.classList.remove("drag-over");
+
+      const files = e.dataTransfer.files;
+      if (files.length > 0) {
+        try {
+          fileInput.files = files;
+        } catch (err) {}
+        showPreview(files[0]);
+      }
+    });
+  });
+</script>
+{% endblock %}
