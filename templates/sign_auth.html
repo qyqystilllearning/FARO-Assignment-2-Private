@@ -1,0 +1,32 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-md-6">
+        <div class="card shadow border-warning">
+            <div class="card-header bg-warning text-dark">
+                <strong><i class="fa-solid fa-pen-nib"></i> Sign Document</strong>
+            </div>
+            <div class="card-body">
+                <p>You are about to digitally sign <strong>{{ filename }}</strong>.</p>
+                <div class="alert alert-light border">
+                    <small>
+                    This will embed a cryptographic signature using your stored Private Key. 
+                    Third-party readers (Adobe, etc.) will be able to verify your identity.
+                    </small>
+                </div>
+                
+                <form method="POST">
+                    <div class="mb-3">
+                        <label class="form-label">Enter Password to Unlock Private Key</label>
+                        <input type="password" name="password_verify" class="form-control" required>
+                    </div>
+                    <div class="d-grid gap-2">
+                        <button type="submit" class="btn btn-warning">Sign PDF</button>
+                        <a href="{{ url_for('dashboard') }}" class="btn btn-outline-secondary">Cancel</a>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

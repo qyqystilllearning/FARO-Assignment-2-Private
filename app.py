@@ -2,6 +2,8 @@ import os
 import json
 import base64
 import time
+import io
+import datetime
 from flask import Flask, render_template, url_for, redirect, request, flash, send_file, Response, session
 from werkzeug.utils import secure_filename
 from uuid import uuid4
@@ -16,6 +18,13 @@ from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives import padding as sym_padding # Rename for clarity
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
+from cryptography import x509
+from cryptography.x509.oid import NameOID
+
+# --- PYHANKO IMPORTS (PDF SIGNING) ---
+from pyhanko.sign import signers, fields
+from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
+from pyhanko.sign.fields import SigSeedSubFilter
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = '5791628bb0b13ce0c676dfde280ba245'
@@ -63,7 +72,7 @@ def get_private_key_from_nosql(user_id):
         return data.get(str(user_id))
 
 # ==========================================
-#  HELPER: Encryption Functions
+#  HELPER: Encryption & Cert Functions
 # ==========================================
 
 def generate_rsa_keypair(password):
@@ -84,7 +93,32 @@ def generate_rsa_keypair(password):
         encoding=serialization.Encoding.PEM,
         format=serialization.PublicFormat.SubjectPublicKeyInfo
     )
-    return public_pem, encrypted_private_pem
+    return public_pem, encrypted_private_pem, private_key
+
+def generate_self_signed_cert(private_key, username):
+    """Generates X.509 Certificate for PDF Signing"""
+    subject = issuer = x509.Name([
+        x509.NameAttribute(NameOID.COUNTRY_NAME, u"ID"),
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME, u"FaroSec Organization"),
+        x509.NameAttribute(NameOID.COMMON_NAME, username),
+    ])
+    cert = x509.CertificateBuilder().subject_name(
+        subject
+    ).issuer_name(
+        issuer
+    ).public_key(
+        private_key.public_key()
+    ).serial_number(
+        x509.random_serial_number()
+    ).not_valid_before(
+        datetime.datetime.utcnow()
+    ).not_valid_after(
+        datetime.datetime.utcnow() + datetime.timedelta(days=365)
+    ).add_extension(
+        x509.BasicConstraints(ca=True, path_length=None), critical=True,
+    ).sign(private_key, hashes.SHA256(), default_backend())
+
+    return cert.public_bytes(serialization.Encoding.PEM).decode('utf-8')
 
 def load_private_key(encrypted_pem_str, password):
     """Unlocks a private key using the user's password."""
@@ -95,7 +129,6 @@ def load_private_key(encrypted_pem_str, password):
     )
 
 def encrypt_rsa(data, public_key_pem):
-    """Encrypts a symmetric key using an RSA Public Key."""
     public_key = serialization.load_pem_public_key(public_key_pem, backend=default_backend())
     ciphertext = public_key.encrypt( 
         data,
@@ -108,7 +141,6 @@ def encrypt_rsa(data, public_key_pem):
     return base64.b64encode(ciphertext).decode('utf-8')
 
 def decrypt_rsa(encrypted_b64, private_key):
-    """Decrypts a symmetric key using an RSA Private Key."""
     ciphertext = base64.b64decode(encrypted_b64)
     plaintext = private_key.decrypt(
         ciphertext,
@@ -121,7 +153,6 @@ def decrypt_rsa(encrypted_b64, private_key):
     return plaintext
 
 def encrypt_aes_gcm(data, key):
-    """Encrypts file data using AES-GCM (Secure Symmetric)."""
     iv = os.urandom(12)
     cipher = Cipher(algorithms.AES(key), modes.GCM(iv), backend=default_backend())
     encryptor = cipher.encryptor()
@@ -129,7 +160,6 @@ def encrypt_aes_gcm(data, key):
     return iv + encryptor.tag + ciphertext
 
 def decrypt_aes_gcm(encrypted_data, key):
-    """Decrypts file data using AES-GCM."""
     iv = encrypted_data[:12]
     tag = encrypted_data[12:28]
     ciphertext = encrypted_data[28:]
@@ -150,18 +180,21 @@ class User(db.Model, UserMixin):
     username = db.Column(db.String(20), unique=True, nullable=False)
     password = db.Column(db.String(60), nullable=False)
     image_file = db.Column(db.String(20), nullable=False, default='default.jpg')
-    
     role = db.Column(db.String(20), nullable=False)  # 'organization' or 'consultant'
     public_key = db.Column(db.Text, nullable=False) # RSA Public Key (SQL Storage)
+    
+    # NEW: X.509 Certificate for PDF Signing
+    certificate = db.Column(db.Text, nullable=True) # X.509 Certificate (Public)
 
 class File(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     filename = db.Column(db.String(100), nullable=False)
     filepath = db.Column(db.String(100), nullable=False)
-    owner_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    
-    # The AES key encrypted with the OWNER'S Public Key
+    owner_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)    
     encrypted_aes_key = db.Column(db.Text, nullable=False)
+    
+    # NEW: PDF Signing Status
+    is_signed = db.Column(db.Boolean, default=False)
 
 class FilePermission(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -184,10 +217,7 @@ class AccessRequest(db.Model):
     consultant_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     file_id = db.Column(db.Integer, db.ForeignKey('file.id'), nullable=False)
     status = db.Column(db.String(20), default='pending')
-    
-    # The AES key encrypted with the CONSULTANT'S Public Key
     encrypted_shared_key = db.Column(db.Text, nullable=True)
-
     consultant = db.relationship('User', foreign_keys=[consultant_id])
     file = db.relationship('File', foreign_keys=[file_id])
 
@@ -210,15 +240,24 @@ def register():
         
         hashed_password = bcrypt.generate_password_hash(password).decode('utf-8')
         
-        # 1. Generate RSA Keys
-        public_pem, encrypted_private_pem = generate_rsa_keypair(password)
+        # 1. Generate RSA Keys 
+        public_pem, encrypted_private_pem, private_key_obj = generate_rsa_keypair(password)
 
-        # 2. Save User (Public Key -> SQL)
-        user = User(username=username, password=hashed_password, role=role, public_key=public_pem.decode('utf-8'))
+        # 2. Generate X.509 Certificate
+        cert_pem = generate_self_signed_cert(private_key_obj, username)
+        
+        # 3. Save User
+        user = User(
+            username=username, 
+            password=hashed_password, 
+            role=role, 
+            public_key=public_pem.decode('utf-8'),
+            certificate=cert_pem
+        )
         db.session.add(user)
         db.session.commit()
         
-        # 3. Save Private Key (Private Key -> NoSQL)
+        # 4. Save Private Key (Private Key -> NoSQL)
         save_private_key_to_nosql(user.id, encrypted_private_pem)
 
         flash(f'Account created for {username}!', 'success')
@@ -249,10 +288,7 @@ def dashboard():
     if current_user.role == 'organization':
         my_files = File.query.filter_by(owner_id=current_user.id).order_by(File.id.desc()).all()
         pending_requests = AccessRequest.query.join(File).filter(File.owner_id == current_user.id, AccessRequest.status == 'pending').all()
-
-        # NEW: fetch FilePermission rows for files owned by this organization user
         shared_permissions = FilePermission.query.join(File).filter(File.owner_id == current_user.id).order_by(FilePermission.id.desc()).all()
-
         return render_template('dashboard.html', files=my_files, requests=pending_requests, shared_permissions=shared_permissions)
     
     elif current_user.role == 'consultant':
@@ -276,14 +312,8 @@ def upload_file():
     if file:
         filename = file.filename
         file_data = file.read()
-
-        # 1. Generate AES Key
         aes_key = os.urandom(32)
-
-        # 2. Encrypt File
         encrypted_data = encrypt_aes_gcm(file_data, aes_key)
-
-        # 3. Encrypt AES Key with Org Public Key
         encrypted_aes_key_for_storage = encrypt_rsa(aes_key, current_user.public_key.encode('utf-8'))
 
         save_path = os.path.join(app.config['UPLOAD_FOLDER'], filename + '.enc')
@@ -315,7 +345,6 @@ def request_access(file_id):
 @app.route('/approve_request/<int:request_id>', methods=['POST'])
 @login_required
 def approve_request(request_id):
-    # The KEY EXCHANGE Logic
     password = request.form.get('password_verify')
     req = AccessRequest.query.get_or_404(request_id)
     file_record = File.query.get(req.file_id)
@@ -323,17 +352,10 @@ def approve_request(request_id):
     if file_record.owner_id != current_user.id:
         return redirect(url_for('dashboard'))
 
-    # 1. Get Org's Encrypted Private Key from NoSQL
     enc_priv_pem = get_private_key_from_nosql(current_user.id)
-    
     try:
-        # 2. Decrypt Org Private Key (Unlock it)
         org_private_key = load_private_key(enc_priv_pem, password)
-        
-        # 3. Decrypt AES Key
         aes_key = decrypt_rsa(file_record.encrypted_aes_key, org_private_key)
-        
-        # 4. Re-Encrypt AES Key with Consultant's Public Key
         consultant = User.query.get(req.consultant_id)
         encrypted_shared_key = encrypt_rsa(aes_key, consultant.public_key.encode('utf-8'))
         
@@ -341,7 +363,6 @@ def approve_request(request_id):
         req.encrypted_shared_key = encrypted_shared_key
         db.session.commit()
         flash('Request approved! Key encrypted securely.', 'success')
-
     except Exception as e:
         flash('Incorrect password or encryption error.', 'danger')
 
@@ -355,18 +376,15 @@ def my_access():
     approved_requests = AccessRequest.query.filter_by(consultant_id=current_user.id, status='approved').all()
     return render_template('my_access.html', requests=approved_requests)
 
-
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg'}
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-
 @app.route('/profile', methods=['GET', 'POST'])
 @login_required
 def profile():
     if request.method == 'POST':
-        # Handle profile picture upload
         if 'profile_pic' not in request.files:
             flash('No file part in request.', 'danger')
             return redirect(url_for('profile'))
@@ -382,8 +400,6 @@ def profile():
             unique_name = f"{uuid4()}.{ext}"
             save_path = os.path.join(app.root_path, 'static', 'profile_pics', unique_name)
             file.save(save_path)
-
-            # Update user record
             current_user.image_file = unique_name
             db.session.commit()
             flash('Profile picture updated.', 'success')
@@ -398,12 +414,7 @@ def profile():
 @app.route('/download/request/<int:request_id>', methods=['POST'])
 @login_required
 def download_file(file_id=None, request_id=None):
-    """
-    Supports two download flows:
-    - Owner download: `GET/POST /download/<file_id>` where owner provides password to decrypt their file.
-    - Consultant download: `POST /download/request/<request_id>` where consultant provides password to decrypt shared AES key.
-    """
-    # --- Owner flow (organization) ---
+    # --- Organization flow ---
     if file_id is not None and current_user.role == 'organization':
         file_record = File.query.get_or_404(file_id)
         if file_record.owner_id != current_user.id:
@@ -413,7 +424,6 @@ def download_file(file_id=None, request_id=None):
         if request.method == 'GET':
             return render_template('confirm_download.html', file_id=file_id, filename=file_record.filename)
 
-        # POST: attempt decrypt using owner's private key
         password = request.form.get('password_verify')
         enc_priv_pem = get_private_key_from_nosql(current_user.id)
         try:
@@ -435,7 +445,6 @@ def download_file(file_id=None, request_id=None):
 
     # --- Consultant flow ---
     if request_id is not None and current_user.role == 'consultant':
-        # Consultants must POST with password
         if request.method != 'POST':
             return redirect(url_for('my_access'))
 
@@ -514,7 +523,6 @@ def share_file():
 @app.route('/revoke_share/<int:permission_id>', methods=['POST'])
 @login_required
 def revoke_share(permission_id):
-    """Allow organization owner to revoke a previously created share (FilePermission)."""
     perm = FilePermission.query.get_or_404(permission_id)
     # Confirm the current user owns the file, otherwise unauthorized
     if perm.file.owner_id != current_user.id:
@@ -525,8 +533,6 @@ def revoke_share(permission_id):
     db.session.commit()
     flash('Share revoked successfully.', 'success')
     return redirect(url_for('dashboard'))
-
-# ... (Import dan kode lain di atas tetap sama) ...
 
 # ==========================================
 #  BENCHMARK LOGIC (AES, DES, RC4)
@@ -712,6 +718,162 @@ def execute_benchmark(file_id):
         session.pop('temp_benchmark_key', None) # Bersihkan jika error
         flash(f'Benchmark failed: {e}', 'danger')
         return redirect(url_for('dashboard'))
+    
+# ==========================================
+#  NEW: DIGITAL SIGNATURE ROUTES
+# ==========================================
+
+@app.route('/sign_pdf/<int:file_id>', methods=['GET', 'POST'])
+@login_required
+def sign_pdf(file_id):
+    file_record = File.query.get_or_404(file_id)
+    if file_record.owner_id != current_user.id:
+        flash('Unauthorized.', 'danger')
+        return redirect(url_for('dashboard'))
+        
+    if not file_record.filename.lower().endswith('.pdf'):
+        flash('Only PDF files can be signed.', 'warning')
+        return redirect(url_for('dashboard'))
+
+    if request.method == 'GET':
+        return render_template('sign_auth.html', file_id=file_id, filename=file_record.filename)
+
+    # POST - Execute Signing
+    password = request.form.get('password_verify')
+    
+    # 1. Decrypt Private Key
+    enc_priv_pem = get_private_key_from_nosql(current_user.id)
+    try:
+        private_key = load_private_key(enc_priv_pem, password)
+        
+        # 2. Decrypt File (Get Raw PDF)
+        aes_key = decrypt_rsa(file_record.encrypted_aes_key, private_key)
+        with open(file_record.filepath, 'rb') as f:
+            encrypted_file_data = f.read()
+        raw_pdf_bytes = decrypt_aes_gcm(encrypted_file_data, aes_key)
+        
+        # 3. Load Certificate
+        if not current_user.certificate:
+             # Fallback if user registered before this feature
+             current_user.certificate = generate_self_signed_cert(private_key, current_user.username)
+             db.session.commit()
+        
+        cert = x509.load_pem_x509_certificate(current_user.certificate.encode('utf-8'))
+
+        # 4. Sign using PyHanko (Embeds signature in PDF structure)
+        pdf_in = io.BytesIO(raw_pdf_bytes)
+        pdf_out = io.BytesIO()
+        
+        cms_signer = signers.SimpleSigner(
+            signing_cert=cert,
+            signing_key=private_key,
+            cert_registry=signers.SimpleCertificateStore.from_certs([cert])
+        )
+        
+        signers.sign_pdf(
+            IncrementalPdfFileWriter(pdf_in),
+            signers.PdfSignatureMetadata(field_name='FaroSecSignature', subfilter=SigSeedSubFilter.ADOBE_PKCS7_DETACHED),
+            signer=cms_signer,
+            output=pdf_out,
+        )
+        
+        signed_pdf_bytes = pdf_out.getvalue()
+        
+        # 5. Re-Encrypt Signed PDF (AES) and Save
+        # Note: We overwrite the encrypted file on disk with the Signed+Encrypted version
+        new_iv_ct = encrypt_aes_gcm(signed_pdf_bytes, aes_key)
+        
+        with open(file_record.filepath, 'wb') as f:
+            f.write(new_iv_ct)
+            
+        file_record.is_signed = True
+        db.session.commit()
+        
+        flash('PDF successfully signed and re-encrypted!', 'success')
+        return redirect(url_for('dashboard'))
+
+    except Exception as e:
+        flash(f'Signing failed: {str(e)}', 'danger')
+        return redirect(url_for('dashboard'))
+
+
+@app.route('/verify_signature/<int:file_id>', methods=['GET', 'POST'])
+@login_required
+def verify_signature(file_id):
+    # Allow Owner, Shared Users, or Consultants with Approved Requests
+    file_record = File.query.get_or_404(file_id)
+    
+    # Simple authorization check (simplified for brevity)
+    is_owner = (file_record.owner_id == current_user.id)
+    
+    # Need password to decrypt file first to read the signature
+    if request.method == 'GET':
+         return render_template('confirm_download.html', file_id=file_id, filename=file_record.filename, action_url=url_for('verify_signature', file_id=file_id))
+
+    password = request.form.get('password_verify')
+    
+    # LOGIC TO GET AES KEY (Differs for Owner vs Consultant)
+    enc_priv_pem = get_private_key_from_nosql(current_user.id)
+    raw_pdf_bytes = None
+    
+    try:
+        user_priv_key = load_private_key(enc_priv_pem, password)
+        
+        if is_owner:
+            aes_key = decrypt_rsa(file_record.encrypted_aes_key, user_priv_key)
+        else:
+            # Check consultant request
+            req = AccessRequest.query.filter_by(consultant_id=current_user.id, file_id=file_id, status='approved').first()
+            if req:
+                aes_key = decrypt_rsa(req.encrypted_shared_key, user_priv_key)
+            else:
+                 # Check shared permission
+                 perm = FilePermission.query.filter_by(shared_with_user_id=current_user.id, file_id=file_id).first()
+                 # For organization sharing, we assume similar key access or owner intervention (simplified for this context: assume owner for now or skip)
+                 # In this architecture, org-sharing needs a key mechanism similar to consultant. 
+                 # For the purpose of assignment, we focus on Owner/Consultant flow.
+                 if not req: raise Exception("No access")
+
+        with open(file_record.filepath, 'rb') as f:
+            encrypted_file_data = f.read()
+        raw_pdf_bytes = decrypt_aes_gcm(encrypted_file_data, aes_key)
+        
+        # VERIFY WITH PYHANKO
+        pdf_in = io.BytesIO(raw_pdf_bytes)
+        r = pyhanko_verify_pdf(pdf_in)
+        
+        return render_template('verification_result.html', results=r, filename=file_record.filename)
+
+    except Exception as e:
+        flash(f"Verification failed: {e}", "danger")
+        return redirect(url_for('dashboard'))
+
+def pyhanko_verify_pdf(pdf_io):
+    from pyhanko.sign import validation
+    from pyhanko.pdf_utils.reader import PdfFileReader
+    
+    root = PdfFileReader(pdf_io)
+    results = []
+    
+    for sig_field in root.embedded_signatures:
+        status = validation.validate_pdf_signature(
+            root, sig_field,
+            # In a real scenario, we would validate trust anchors here.
+            # Since we use self-signed, we just check integrity and signer identity.
+        )
+        
+        signer_info = status.signer_cert.subject.human_friendly
+        valid = status.valid
+        intact = status.intact
+        
+        results.append({
+            'field': sig_field,
+            'signer': signer_info,
+            'valid': valid,
+            'intact': intact,
+            'timestamp': status.signing_time
+        })
+    return results
     
 if __name__ == '__main__':
     with app.app_context():
