@@ -25,6 +25,8 @@ from cryptography.x509.oid import NameOID
 from pyhanko.sign import signers, fields
 from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
 from pyhanko.sign.fields import SigSeedSubFilter
+from pyhanko_certvalidator.registry import SimpleCertificateStore
+from pyhanko.keys import load_certs_from_pemder_data, load_private_key_from_pemder_data
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = '5791628bb0b13ce0c676dfde280ba245'
@@ -422,7 +424,7 @@ def download_file(file_id=None, request_id=None):
             return redirect(url_for('dashboard'))
 
         if request.method == 'GET':
-            return render_template('confirm_download.html', file_id=file_id, filename=file_record.filename)
+            return render_template('confirm_download.html', file_id=file_id, filename=file_record.filename, action_url=url_for('download_file', file_id=file_id), title="Confirm Download", btn_label="Decrypt & Download")
 
         password = request.form.get('password_verify')
         enc_priv_pem = get_private_key_from_nosql(current_user.id)
@@ -758,7 +760,16 @@ def sign_pdf(file_id):
              current_user.certificate = generate_self_signed_cert(private_key, current_user.username)
              db.session.commit()
         
-        cert = x509.load_pem_x509_certificate(current_user.certificate.encode('utf-8'))
+        # load_certs_from_pemder_data returns a generator, we take the first one
+        cert = next(load_certs_from_pemder_data(current_user.certificate.encode('utf-8')))
+
+        # Convert cryptography key to pyhanko-compatible key (asn1crypto)
+        pem_key_bytes = private_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption()
+        )
+        pyhanko_key = load_private_key_from_pemder_data(pem_key_bytes, None)
 
         # 4. Sign using PyHanko (Embeds signature in PDF structure)
         pdf_in = io.BytesIO(raw_pdf_bytes)
@@ -766,12 +777,12 @@ def sign_pdf(file_id):
         
         cms_signer = signers.SimpleSigner(
             signing_cert=cert,
-            signing_key=private_key,
-            cert_registry=signers.SimpleCertificateStore.from_certs([cert])
+            signing_key=pyhanko_key,
+            cert_registry=SimpleCertificateStore.from_certs([cert])
         )
         
         signers.sign_pdf(
-            IncrementalPdfFileWriter(pdf_in),
+            IncrementalPdfFileWriter(pdf_in, strict=False),
             signers.PdfSignatureMetadata(field_name='FaroSecSignature', subfilter=SigSeedSubFilter.ADOBE_PKCS7_DETACHED),
             signer=cms_signer,
             output=pdf_out,
@@ -808,7 +819,7 @@ def verify_signature(file_id):
     
     # Need password to decrypt file first to read the signature
     if request.method == 'GET':
-         return render_template('confirm_download.html', file_id=file_id, filename=file_record.filename, action_url=url_for('verify_signature', file_id=file_id))
+         return render_template('confirm_download.html', file_id=file_id, filename=file_record.filename, action_url=url_for('verify_signature', file_id=file_id), title="Verify Signature", btn_label="Decrypt & Verify")
 
     password = request.form.get('password_verify')
     
@@ -857,12 +868,12 @@ def pyhanko_verify_pdf(pdf_io):
     
     for sig_field in root.embedded_signatures:
         status = validation.validate_pdf_signature(
-            root, sig_field,
+            sig_field,
             # In a real scenario, we would validate trust anchors here.
             # Since we use self-signed, we just check integrity and signer identity.
         )
         
-        signer_info = status.signer_cert.subject.human_friendly
+        signer_info = status.signing_cert.subject.human_friendly
         valid = status.valid
         intact = status.intact
         
@@ -871,7 +882,7 @@ def pyhanko_verify_pdf(pdf_io):
             'signer': signer_info,
             'valid': valid,
             'intact': intact,
-            'timestamp': status.signing_time
+            'timestamp': status.signer_reported_dt
         })
     return results
     
